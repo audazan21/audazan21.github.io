@@ -2,9 +2,7 @@ from pathlib import Path
 import pandas as pd
 import joblib
 import streamlit as st
-from urllib.parse import urlparse
-import difflib
-import io
+
 
 
 ROOT = Path(__file__).resolve().parent
@@ -181,6 +179,7 @@ with tab2:
             st.error(str(e))
 
 st.caption("Model: TF-IDF (char 2–5-gram) + Logistic Regression, kural eklemeleriyle.")
+
 
 
 
