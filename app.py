@@ -2,21 +2,68 @@ from pathlib import Path
 import pandas as pd
 import joblib
 import streamlit as st
-
-
+import difflib, io, re, ipaddress
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent
 MODEL_FILE = ROOT / "models" / "phishing_url_baseline.joblib"
 
-
 def _registered_domain(url: str) -> str:
-    host = urlparse(url).netloc.lower()
+    p = urlparse(url)
+    host = (p.hostname or "").lower()
     if ":" in host:
         host = host.split(":")[0]
     parts = [p for p in host.split(".") if p]
     if len(parts) >= 2:
         return ".".join(parts[-2:])
     return host
+
+def _is_ip_host(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+def _brandless_anomaly_flags(url: str):
+    p = urlparse(url)
+    raw_host = p.netloc
+    host = (p.hostname or "").lower()
+    pathq = (p.path or "") + ("?" + p.query if p.query else "")
+    flags, notes = [], []
+    if p.scheme.lower() == "http":
+        flags.append("http")
+    if p.port and p.port not in (80, 443):
+        flags.append("nonstd-port"); notes.append(f"port={p.port}")
+    if "@" in raw_host or p.username or p.password:
+        flags.append("userinfo@")
+    if _is_ip_host(host):
+        flags.append("ip-host")
+    if "xn--" in host:
+        flags.append("punycode")
+    if re.search(r"[^\x00-\x7f]", host):
+        flags.append("non-ascii")
+        if re.search(r"[a-z]", host):
+            flags.append("mixed-script")
+    labels = [l for l in host.split(".") if l]
+    if len(labels) >= 4:
+        flags.append("many-subdomains"); notes.append(f"labels={len(labels)}")
+    sld = labels[-2] if len(labels) >= 2 else (labels[0] if labels else "")
+    if any(ch.isdigit() for ch in sld):
+        flags.append("digit-in-sld")
+    if re.search(r'[a-z][0-9]|[0-9][a-z]', sld):
+        flags.append("digit-subst")
+    if re.search(r'(.)\1\1', sld):
+        flags.append("repeat-run")
+    if len(sld) >= 15:
+        flags.append("long-label")
+    if sld.startswith("-") or sld.endswith("-"):
+        flags.append("hyphen-edge")
+    if re.search(r'login|verify|billing|update|confirm|secure|recovery', pathq, re.I):
+        flags.append("phishy-kw")
+    if len(url) >= 100:
+        flags.append("long-url")
+    return flags, notes
 
 _POPULAR = [
     "google.com", "youtube.com", "facebook.com", "apple.com",
@@ -41,18 +88,13 @@ def _extra_suspicious_signals(url: str) -> bool:
 @st.cache_resource
 def load_model():
     if not MODEL_FILE.exists():
-        raise FileNotFoundError(
-            f"Model dosyası yok: {MODEL_FILE}\nÖnce train_baseline.py dosyasını çalıştırıp modeli kaydedin."
-        )
+        raise FileNotFoundError(f"Model dosyası yok: {MODEL_FILE}\nÖnce train_baseline.py dosyasını çalıştırıp modeli kaydedin.")
     return joblib.load(MODEL_FILE)
 
 def predict_one(url: str, base_thr: float = 0.50, use_rules: bool = True):
     pipe = load_model()
     proba = float(pipe.predict_proba([url])[:, 1][0])
-
     dom = _registered_domain(url)
-
-    # Tetiklenen bayrakları topla
     flags = []
     if _looks_like_typosquat(url):
         flags.append("typosquat")
@@ -61,21 +103,38 @@ def predict_one(url: str, base_thr: float = 0.50, use_rules: bool = True):
     sld = dom.split(".")[0] if dom else ""
     if any(ch.isdigit() for ch in sld):
         flags.append("sayılı-domain")
-
-   
+    flags2, notes2 = _brandless_anomaly_flags(url)
+    flags.extend(flags2)
     final_score = proba
-    if use_rules and "typosquat" in flags:
-        final_score = max(final_score, 0.75)
-
+    if use_rules:
+        boost = {
+            "userinfo@": 0.95,
+            "punycode": 0.92,
+            "mixed-script": 0.90,
+            "ip-host": 0.85,
+            "typosquat": 0.75,
+            "digit-subst": 0.75,
+            "http": 0.70,
+            "many-subdomains": 0.70,
+            "nonstd-port": 0.70,
+            "phishy-kw": 0.70,
+            "sayılı-domain": 0.70,
+            "long-url": 0.68,
+            "digit-in-sld": 0.68,
+            "long-label": 0.68,
+            "hyphen-edge": 0.68,
+            "non-ascii": 0.72,
+        }
+        for f in flags:
+            if f in boost:
+                final_score = max(final_score, boost[f])
     pred = int(final_score >= base_thr)
-
     reasons = []
     if flags:
-        reasons.append("Kural (tetiklenen): " + ", ".join(flags))
-
-    
+        reasons.append("Kural (tetiklenen): " + ", ".join(sorted(set(flags))))
+    if notes2:
+        reasons.extend(notes2)
     try:
-        import difflib
         best_ref, best_sim = None, 0.0
         for ref in _POPULAR:
             r = difflib.SequenceMatcher(None, dom, ref).ratio()
@@ -84,43 +143,17 @@ def predict_one(url: str, base_thr: float = 0.50, use_rules: bool = True):
         if best_ref and best_ref != dom and best_sim >= 0.80:
             reasons.append(f"Popüler domaine çok benzer: {best_ref} (sim={best_sim:.2f})")
     except NameError:
-  
         pass
-
     label = "PHISHING" if pred == 1 else "LEGIT"
     return label, proba, ", ".join(reasons) if reasons else "-"
 
-def predict_batch(urls, base_thr: float = 0.50) -> pd.DataFrame:
-    pipe = load_model()
+def predict_batch(urls, base_thr: float = 0.50, use_rules: bool = True) -> pd.DataFrame:
     urls = [str(u) for u in urls]
-    probs = pipe.predict_proba(urls)[:, 1]
-    preds = (probs >= base_thr).astype(int)
-
-    adjusted = []
-    reasons_all = []
-    for u, yhat in zip(urls, preds):
-        reasons = []
-        final = int(yhat)
-        if final == 0 and (_looks_like_typosquat(u) or _extra_suspicious_signals(u)):
-            final = 1
-            reasons.append("Kural: typosquat/HTTP/sayılı-domain")
-        dom = _registered_domain(u)
-        if urlparse(u).scheme.lower() == "http":
-            reasons.append("HTTP (TLS yok)")
-        if any(ch.isdigit() for ch in dom.split(".")[0]):
-            reasons.append("Alan adı ilk kısmında sayı var")
-        if _looks_like_typosquat(u):
-            reasons.append(f"Popüler domaine çok benzer: {dom}")
-        adjusted.append(final)
-        reasons_all.append(", ".join(sorted(set(reasons))) if reasons else "-")
-
-    df = pd.DataFrame({
-        "url": urls,
-        "pred_proba": probs,
-        "pred_label": adjusted
-    })
-    df["pred_text"] = df["pred_label"].map({1: "PHISHING", 0: "LEGIT"})
-    df["reasons"] = reasons_all
+    rows = []
+    for u in urls:
+        label, proba, why = predict_one(u, base_thr=base_thr, use_rules=use_rules)
+        rows.append((u, label, proba, why))
+    df = pd.DataFrame(rows, columns=["url", "pred_text", "pred_proba", "reasons"])
     return df[["url", "pred_text", "pred_proba", "reasons"]]
 
 st.set_page_config(page_title="Phishing URL Tespiti", page_icon="🛡️", layout="centered")
@@ -137,18 +170,17 @@ with tab1:
     url = st.text_input("URL girin", placeholder="https://example.com/login")
     if st.button("Tahmin Et", type="primary") and url:
         try:
-            label, proba, why = predict_one(url, base_thr=thr)
+            label, proba, why = predict_one(url, base_thr=thr, use_rules=True)
             st.metric(label="Sonuç", value=label, delta=f"proba={proba:.3f}")
             st.write("**Gerekçeler:**", why)
         except Exception as e:
             st.error(str(e))
 
 with tab2:
-    st.write("Aşağıya her satıra bir URL yapıştırın **veya** `url` kolonu olan bir CSV yükleyin.")
+    st.write("Aşağıya her satıra bir URL yapıştırın veya `url` kolonu olan bir CSV yükleyin.")
     txt = st.text_area("Çoklu URL", height=150, placeholder="https://a...\nhttp://b...\nhttps://c...")
     up = st.file_uploader("CSV yükle (isteğe bağlı)", type=["csv"])
     run = st.button("Toplu Skorla", type="primary")
-
     if run:
         try:
             urls = []
@@ -160,30 +192,16 @@ with tab2:
                     st.error("CSV içinde 'url' kolonu yok.")
                 else:
                     urls.extend(df_in["url"].astype(str).tolist())
-
-            urls = list(dict.fromkeys(urls))  # tekrarsız
+            urls = list(dict.fromkeys(urls))
             if not urls:
                 st.warning("Skorlanacak URL bulunamadı.")
             else:
-                out = predict_batch(urls, base_thr=thr)
+                out = predict_batch(urls, base_thr=thr, use_rules=True)
                 st.dataframe(out, use_container_width=True)
                 buf = io.StringIO()
                 out.to_csv(buf, index=False)
-                st.download_button(
-                    "CSV indir",
-                    data=buf.getvalue(),
-                    file_name="scored_urls.csv",
-                    mime="text/csv"
-                )
+                st.download_button("CSV indir", data=buf.getvalue(), file_name="scored_urls.csv", mime="text/csv")
         except Exception as e:
             st.error(str(e))
 
 st.caption("Model: TF-IDF (char 2–5-gram) + Logistic Regression, kural eklemeleriyle.")
-
-
-
-
-
-
-
-
