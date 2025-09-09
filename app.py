@@ -8,15 +8,27 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parent
 MODEL_FILE = ROOT / "models" / "phishing_url_baseline.joblib"
 
+_MULTI_SUFFIXES = {
+    "com.tr","edu.tr","gov.tr","org.tr","net.tr","k12.tr",
+    "co.uk","ac.uk","gov.uk",
+    "com.au","com.br",
+    "co.jp","ac.jp"
+}
+
+def _split_labels(host: str):
+    return [l for l in host.split(".") if l]
+
 def _registered_domain(url: str) -> str:
     p = urlparse(url)
     host = (p.hostname or "").lower()
-    if ":" in host:
-        host = host.split(":")[0]
-    parts = [p for p in host.split(".") if p]
-    if len(parts) >= 2:
-        return ".".join(parts[-2:])
-    return host
+    labels = _split_labels(host)
+    if not labels:
+        return host
+    last2 = ".".join(labels[-2:]) if len(labels) >= 2 else ""
+    suf_count = 2 if last2 in _MULTI_SUFFIXES else 1
+    if len(labels) >= suf_count + 1:
+        return ".".join(labels[-(suf_count + 1):])
+    return ".".join(labels)
 
 def _is_ip_host(host: str) -> bool:
     try:
@@ -29,6 +41,11 @@ def _brandless_anomaly_flags(url: str):
     p = urlparse(url)
     raw_host = p.netloc
     host = (p.hostname or "").lower()
+    labels = _split_labels(host)
+    last2 = ".".join(labels[-2:]) if len(labels) >= 2 else ""
+    suf_count = 2 if last2 in _MULTI_SUFFIXES else 1
+    subs = labels[:-(suf_count + 1)] if len(labels) >= suf_count + 1 else []
+    sld = labels[-(suf_count + 1)] if len(labels) >= suf_count + 1 else (labels[0] if labels else "")
     pathq = (p.path or "") + ("?" + p.query if p.query else "")
     flags, notes = [], []
     if p.scheme.lower() == "http":
@@ -45,20 +62,16 @@ def _brandless_anomaly_flags(url: str):
         flags.append("non-ascii")
         if re.search(r"[a-z]", host):
             flags.append("mixed-script")
-    labels = [l for l in host.split(".") if l]
-    if len(labels) >= 4:
-        flags.append("many-subdomains"); notes.append(f"labels={len(labels)}")
-    tld = labels[-1] if labels else ""
-    sld = labels[-2] if len(labels) >= 2 else (labels[0] if labels else "")
-    subs = labels[:-2] if len(labels) >= 2 else []
-    safe_subs = {"m", "mail", "cdn", "static", "img", "images", "i", "s", "api"}
-    check_labels = [sld] + [l for l in subs if not re.fullmatch(r"www\d*", l) and l not in safe_subs]
+    if len(subs) >= 2:
+        flags.append("many-subdomains"); notes.append(f"subdomains={len(subs)}")
+    safe_subs = {"www","m","mail","webmail","owa","smtp","imap","cdn","static","img","images","i","s","api","portal"}
+    check_labels = [sld] + [l for l in subs if l not in safe_subs and not re.fullmatch(r"www\d*", l)]
     for lab in check_labels:
         if any(ch.isdigit() for ch in lab):
             flags.append("digit-in-label")
         if re.search(r"[a-z][0-9]|[0-9][a-z]", lab):
             flags.append("digit-subst")
-        if re.search(r"(.)\1\1", lab) and not re.fullmatch(r"www\d*", lab):
+        if re.search(r"(.)\1\1", lab):
             flags.append("repeat-run")
         if len(lab) >= 15:
             flags.append("long-label")
@@ -71,8 +84,8 @@ def _brandless_anomaly_flags(url: str):
     return flags, notes
 
 _POPULAR = [
-    "google.com", "youtube.com", "facebook.com", "apple.com",
-    "amazon.com", "twitter.com", "x.com", "github.com",
+    "google.com","youtube.com","facebook.com","apple.com",
+    "amazon.com","twitter.com","x.com","github.com",
 ]
 
 def _looks_like_typosquat(url: str, similarity_thr: float = 0.80) -> bool:
@@ -129,7 +142,7 @@ def predict_one(url: str, base_thr: float = 0.50, use_rules: bool = True):
             "long-label": 0.68,
             "hyphen-edge": 0.68,
             "non-ascii": 0.72,
-            "repeat-run": 0.72,
+            "repeat-run": 0.72
         }
         for f in flags:
             if f in boost:
