@@ -48,17 +48,18 @@ def _brandless_anomaly_flags(url: str):
     labels = [l for l in host.split(".") if l]
     if len(labels) >= 4:
         flags.append("many-subdomains"); notes.append(f"labels={len(labels)}")
-    sld = labels[-2] if len(labels) >= 2 else (labels[0] if labels else "")
-    if any(ch.isdigit() for ch in sld):
-        flags.append("digit-in-sld")
-    if re.search(r'[a-z][0-9]|[0-9][a-z]', sld):
-        flags.append("digit-subst")
-    if re.search(r'(.)\1\1', sld):
-        flags.append("repeat-run")
-    if len(sld) >= 15:
-        flags.append("long-label")
-    if sld.startswith("-") or sld.endswith("-"):
-        flags.append("hyphen-edge")
+    check_labels = labels[:-1] if len(labels) >= 1 else []
+    for lab in check_labels:
+        if any(ch.isdigit() for ch in lab):
+            flags.append("digit-in-label")
+        if re.search(r'[a-z][0-9]|[0-9][a-z]', lab):
+            flags.append("digit-subst")
+        if re.search(r'(.)\1\1', lab):
+            flags.append("repeat-run")
+        if len(lab) >= 15:
+            flags.append("long-label")
+        if lab.startswith("-") or lab.endswith("-"):
+            flags.append("hyphen-edge")
     if re.search(r'login|verify|billing|update|confirm|secure|recovery', pathq, re.I):
         flags.append("phishy-kw")
     if len(url) >= 100:
@@ -114,16 +115,17 @@ def predict_one(url: str, base_thr: float = 0.50, use_rules: bool = True):
             "ip-host": 0.85,
             "typosquat": 0.75,
             "digit-subst": 0.75,
+            "digit-in-label": 0.72,
             "http": 0.70,
             "many-subdomains": 0.70,
             "nonstd-port": 0.70,
             "phishy-kw": 0.70,
             "sayılı-domain": 0.70,
             "long-url": 0.68,
-            "digit-in-sld": 0.68,
             "long-label": 0.68,
             "hyphen-edge": 0.68,
             "non-ascii": 0.72,
+            "repeat-run": 0.72,
         }
         for f in flags:
             if f in boost:
