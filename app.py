@@ -52,29 +52,30 @@ def predict_one(url: str, base_thr: float = 0.50, use_rules: bool = True):
 
     dom = _registered_domain(url)
 
-
+    # Tetiklenen bayrakları topla
     flags = []
     if _looks_like_typosquat(url):
         flags.append("typosquat")
     if urlparse(url).scheme.lower() == "http":
         flags.append("http")
-    if any(ch.isdigit() for ch in dom.split(".")[0]):
+    sld = dom.split(".")[0] if dom else ""
+    if any(ch.isdigit() for ch in sld):
         flags.append("sayılı-domain")
 
-final_score = proba
-if use_rules and "typosquat" in flags:
-    final_score = max(final_score, 0.75)   
-pred = int(final_score >= base_thr)
+   
+    final_score = proba
+    if use_rules and "typosquat" in flags:
+        final_score = max(final_score, 0.75)
 
-
+    pred = int(final_score >= base_thr)
 
     reasons = []
     if flags:
         reasons.append("Kural (tetiklenen): " + ", ".join(flags))
 
-   
-    if _looks_like_typosquat(url):
-     
+    
+    try:
+        import difflib
         best_ref, best_sim = None, 0.0
         for ref in _POPULAR:
             r = difflib.SequenceMatcher(None, dom, ref).ratio()
@@ -82,6 +83,9 @@ pred = int(final_score >= base_thr)
                 best_ref, best_sim = ref, r
         if best_ref and best_ref != dom and best_sim >= 0.80:
             reasons.append(f"Popüler domaine çok benzer: {best_ref} (sim={best_sim:.2f})")
+    except NameError:
+  
+        pass
 
     label = "PHISHING" if pred == 1 else "LEGIT"
     return label, proba, ", ".join(reasons) if reasons else "-"
@@ -175,6 +179,7 @@ with tab2:
             st.error(str(e))
 
 st.caption("Model: TF-IDF (char 2–5-gram) + Logistic Regression, kural eklemeleriyle.")
+
 
 
 
