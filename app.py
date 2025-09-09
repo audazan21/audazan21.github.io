@@ -67,6 +67,8 @@ def predict_one(url: str, base_thr: float = 0.50, use_rules: bool = True):
         
 
     pred = int(final_score >= base_thr)
+    final_score = max(final_score, 0.75)
+
 
     reasons = []
     if flags:
@@ -175,5 +177,6 @@ with tab2:
             st.error(str(e))
 
 st.caption("Model: TF-IDF (char 2–5-gram) + Logistic Regression, kural eklemeleriyle.")
+
 
 
