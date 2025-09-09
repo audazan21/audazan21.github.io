@@ -5,9 +5,19 @@ import streamlit as st
 from urllib.parse import urlparse
 import difflib
 import io
+import re
 
 ROOT = Path(__file__).resolve().parent
 MODEL_FILE = ROOT / "models" / "phishing_url_baseline.joblib"
+
+def _refang(u: str) -> str:
+    s = (u or "").strip()
+    
+    s = s.replace("hxxps://", "https://").replace("hxxp://", "http://")
+    s = s.replace("[.]", ".").replace("(.)", ".").replace("{.}", ".")
+    s = s.replace("[dot]", ".").replace("(dot)", ".")
+    s = re.sub(r"\s+", "", s) 
+    return s
 
 def _registered_domain(url: str) -> str:
     host = urlparse(url).netloc.lower()
@@ -179,6 +189,7 @@ with tab2:
             st.error(str(e))
 
 st.caption("Model: TF-IDF (char 2–5-gram) + Logistic Regression, kural eklemeleriyle.")
+
 
 
 
