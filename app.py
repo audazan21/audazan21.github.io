@@ -52,7 +52,7 @@ def predict_one(url: str, base_thr: float = 0.50, use_rules: bool = True):
 
     dom = _registered_domain(url)
 
-    # Tetiklenen bayrakları topla
+
     flags = []
     if _looks_like_typosquat(url):
         flags.append("typosquat")
@@ -61,13 +61,11 @@ def predict_one(url: str, base_thr: float = 0.50, use_rules: bool = True):
     if any(ch.isdigit() for ch in dom.split(".")[0]):
         flags.append("sayılı-domain")
 
-    final_score = proba
-    if use_rules and "typosquat" in flags:
-        
-        
+final_score = proba
+if use_rules and "typosquat" in flags:
+    final_score = max(final_score, 0.75)   
+pred = int(final_score >= base_thr)
 
-    pred = int(final_score >= base_thr)
-    final_score = max(final_score, 0.75)
 
 
     reasons = []
@@ -177,6 +175,7 @@ with tab2:
             st.error(str(e))
 
 st.caption("Model: TF-IDF (char 2–5-gram) + Logistic Regression, kural eklemeleriyle.")
+
 
 
 
