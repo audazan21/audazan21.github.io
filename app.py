@@ -6,11 +6,9 @@ from urllib.parse import urlparse
 import difflib
 import io
 
-# ==== Yollar ====
 ROOT = Path(__file__).resolve().parent
 MODEL_FILE = ROOT / "models" / "phishing_url_baseline.joblib"
 
-# ==== Eğitim kodundaki yardımcılar (birebir) ====
 def _registered_domain(url: str) -> str:
     host = urlparse(url).netloc.lower()
     if ":" in host:
@@ -48,28 +46,45 @@ def load_model():
         )
     return joblib.load(MODEL_FILE)
 
-def predict_one(url: str, base_thr: float = 0.50):
+def predict_one(url: str, base_thr: float = 0.50, use_rules: bool = True):
     pipe = load_model()
     proba = float(pipe.predict_proba([url])[:, 1][0])
-    pred = int(proba >= base_thr)
-    reasons = []
 
-    # Kural ayarlamaları
-    if pred == 0 and (_looks_like_typosquat(url) or _extra_suspicious_signals(url)):
-        pred = 1
-        reasons.append("Kural: typosquat/HTTP/sayılı-domain sinyali")
-
-    # Açıklama amaçlı zenginleştirme
     dom = _registered_domain(url)
-    if urlparse(url).scheme.lower() == "http":
-        reasons.append("HTTP (TLS yok)")
-    if any(ch.isdigit() for ch in dom.split(".")[0]):
-        reasons.append("Alan adı ilk kısmında sayı var")
+
+    # Tetiklenen bayrakları topla
+    flags = []
     if _looks_like_typosquat(url):
-        reasons.append(f"Popüler domaine çok benzer: {dom}")
+        flags.append("typosquat")
+    if urlparse(url).scheme.lower() == "http":
+        flags.append("http")
+    if any(ch.isdigit() for ch in dom.split(".")[0]):
+        flags.append("sayılı-domain")
+
+    final_score = proba
+    if use_rules and "typosquat" in flags:
+        
+        final_score = max(final_score, 0.75)
+
+    pred = int(final_score >= base_thr)
+
+    reasons = []
+    if flags:
+        reasons.append("Kural (tetiklenen): " + ", ".join(flags))
+
+   
+    if _looks_like_typosquat(url):
+     
+        best_ref, best_sim = None, 0.0
+        for ref in _POPULAR:
+            r = difflib.SequenceMatcher(None, dom, ref).ratio()
+            if r > best_sim:
+                best_ref, best_sim = ref, r
+        if best_ref and best_ref != dom and best_sim >= 0.80:
+            reasons.append(f"Popüler domaine çok benzer: {best_ref} (sim={best_sim:.2f})")
 
     label = "PHISHING" if pred == 1 else "LEGIT"
-    return label, proba, ", ".join(sorted(set(reasons))) if reasons else "-"
+    return label, proba, ", ".join(reasons) if reasons else "-"
 
 def predict_batch(urls, base_thr: float = 0.50) -> pd.DataFrame:
     pipe = load_model()
@@ -104,7 +119,6 @@ def predict_batch(urls, base_thr: float = 0.50) -> pd.DataFrame:
     df["reasons"] = reasons_all
     return df[["url", "pred_text", "pred_proba", "reasons"]]
 
-# ==== UI ====
 st.set_page_config(page_title="Phishing URL Tespiti", page_icon="🛡️", layout="centered")
 st.title("🛡️ Phishing URL Tespiti (Baseline)")
 
@@ -149,7 +163,6 @@ with tab2:
             else:
                 out = predict_batch(urls, base_thr=thr)
                 st.dataframe(out, use_container_width=True)
-                # indirilebilir CSV
                 buf = io.StringIO()
                 out.to_csv(buf, index=False)
                 st.download_button(
@@ -162,3 +175,4 @@ with tab2:
             st.error(str(e))
 
 st.caption("Model: TF-IDF (char 2–5-gram) + Logistic Regression, kural eklemeleriyle.")
+
