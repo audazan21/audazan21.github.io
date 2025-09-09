@@ -8,27 +8,47 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parent
 MODEL_FILE = ROOT / "models" / "phishing_url_baseline.joblib"
 
-_MULTI_SUFFIXES = {
-    "com.tr","edu.tr","gov.tr","org.tr","net.tr","k12.tr",
-    "co.uk","ac.uk","gov.uk",
-    "com.au","com.br",
-    "co.jp","ac.jp"
+_PSL2 = {
+    "com.tr","net.tr","org.tr","edu.tr","gov.tr","mil.tr","bel.tr","pol.tr","k12.tr","gen.tr","av.tr","bbs.tr","name.tr",
+    "co.uk","org.uk","ac.uk","gov.uk","sch.uk","ltd.uk","plc.uk","me.uk",
+    "com.au","net.au","org.au","edu.au","gov.au",
+    "co.jp","ne.jp","or.jp","ac.jp","go.jp",
+    "co.nz","org.nz","ac.nz","govt.nz"
 }
 
-def _split_labels(host: str):
-    return [l for l in host.split(".") if l]
+_SAFE_SUBS = {
+    "www","m","mail","webmail","owa","smtp","imap","pop","pop3","mx","ns","cdn","static","img","images","files","file",
+    "drive","dl","download","api","s","gw","vpn","id","login","auth","cas","sso","portal","webvpn"
+}
+
+def _refang(u: str) -> str:
+    s = (u or "").strip()
+    s = s.replace("hxxps://", "https://").replace("hxxp://", "http://")
+    s = s.replace("[.]", ".").replace("(.)", ".").replace("{.}", ".")
+    s = s.replace("[dot]", ".").replace("(dot)", ".")
+    s = re.sub(r"\s+", "", s)
+    return s
+
+def _normalize_url(u: str) -> str:
+    s = _refang(u)
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+\-.]*://", s):
+        s = "http://" + s
+    return s
+
+def _split_host(host: str):
+    labels = [p for p in host.split(".") if p]
+    sfx_len = 2 if len(labels) >= 2 and ".".join(labels[-2:]) in _PSL2 else 1
+    return labels, sfx_len
 
 def _registered_domain(url: str) -> str:
-    p = urlparse(url)
+    p = urlparse(_normalize_url(url))
     host = (p.hostname or "").lower()
-    labels = _split_labels(host)
-    if not labels:
-        return host
-    last2 = ".".join(labels[-2:]) if len(labels) >= 2 else ""
-    suf_count = 2 if last2 in _MULTI_SUFFIXES else 1
-    if len(labels) >= suf_count + 1:
-        return ".".join(labels[-(suf_count + 1):])
-    return ".".join(labels)
+    if ":" in host:
+        host = host.split(":")[0]
+    labels, sfx_len = _split_host(host)
+    if len(labels) >= 1 + sfx_len:
+        return ".".join(labels[-(1 + sfx_len):])
+    return host
 
 def _is_ip_host(host: str) -> bool:
     try:
@@ -38,14 +58,9 @@ def _is_ip_host(host: str) -> bool:
         return False
 
 def _brandless_anomaly_flags(url: str):
-    p = urlparse(url)
+    p = urlparse(_normalize_url(url))
     raw_host = p.netloc
     host = (p.hostname or "").lower()
-    labels = _split_labels(host)
-    last2 = ".".join(labels[-2:]) if len(labels) >= 2 else ""
-    suf_count = 2 if last2 in _MULTI_SUFFIXES else 1
-    subs = labels[:-(suf_count + 1)] if len(labels) >= suf_count + 1 else []
-    sld = labels[-(suf_count + 1)] if len(labels) >= suf_count + 1 else (labels[0] if labels else "")
     pathq = (p.path or "") + ("?" + p.query if p.query else "")
     flags, notes = [], []
     if p.scheme.lower() == "http":
@@ -62,16 +77,19 @@ def _brandless_anomaly_flags(url: str):
         flags.append("non-ascii")
         if re.search(r"[a-z]", host):
             flags.append("mixed-script")
-    if len(subs) >= 2:
-        flags.append("many-subdomains"); notes.append(f"subdomains={len(subs)}")
-    safe_subs = {"www","m","mail","webmail","owa","smtp","imap","cdn","static","img","images","i","s","api","portal"}
-    check_labels = [sld] + [l for l in subs if l not in safe_subs and not re.fullmatch(r"www\d*", l)]
+    labels, sfx_len = _split_host(host)
+    subs = labels[:-(1 + sfx_len)] if len(labels) >= 1 + sfx_len else []
+    sld  = labels[-(1 + sfx_len)] if len(labels) >= 1 + sfx_len else (labels[0] if labels else "")
+    noisy_subs = [l for l in subs if not re.fullmatch(r"www\d*", l) and l not in _SAFE_SUBS]
+    if len(noisy_subs) >= 3:
+        flags.append("many-subdomains"); notes.append(f"subdepth={len(noisy_subs)}")
+    check_labels = [sld] + noisy_subs
     for lab in check_labels:
         if any(ch.isdigit() for ch in lab):
             flags.append("digit-in-label")
         if re.search(r"[a-z][0-9]|[0-9][a-z]", lab):
             flags.append("digit-subst")
-        if re.search(r"(.)\1\1", lab):
+        if re.search(r"(.)\1\1", lab) and not re.fullmatch(r"www\d*", lab):
             flags.append("repeat-run")
         if len(lab) >= 15:
             flags.append("long-label")
@@ -85,7 +103,7 @@ def _brandless_anomaly_flags(url: str):
 
 _POPULAR = [
     "google.com","youtube.com","facebook.com","apple.com",
-    "amazon.com","twitter.com","x.com","github.com",
+    "amazon.com","twitter.com","x.com","github.com"
 ]
 
 def _looks_like_typosquat(url: str, similarity_thr: float = 0.80) -> bool:
@@ -98,9 +116,11 @@ def _looks_like_typosquat(url: str, similarity_thr: float = 0.80) -> bool:
     return False
 
 def _extra_suspicious_signals(url: str) -> bool:
-    scheme = urlparse(url).scheme.lower()
-    dom = _registered_domain(url)
-    has_digits_in_domain = any(ch.isdigit() for ch in dom.split(".")[0])
+    p = urlparse(_normalize_url(url))
+    scheme = p.scheme.lower()
+    host = (p.hostname or "") 
+    sld = host.split(".")[0] if host else ""
+    has_digits_in_domain = any(ch.isdigit() for ch in sld)
     return (scheme == "http") or has_digits_in_domain
 
 @st.cache_resource
@@ -110,6 +130,7 @@ def load_model():
     return joblib.load(MODEL_FILE)
 
 def predict_one(url: str, base_thr: float = 0.50, use_rules: bool = True):
+    url = _normalize_url(url)
     pipe = load_model()
     proba = float(pipe.predict_proba([url])[:, 1][0])
     dom = _registered_domain(url)
@@ -167,7 +188,7 @@ def predict_one(url: str, base_thr: float = 0.50, use_rules: bool = True):
     return label, proba, ", ".join(reasons) if reasons else "-"
 
 def predict_batch(urls, base_thr: float = 0.50, use_rules: bool = True) -> pd.DataFrame:
-    urls = [str(u) for u in urls]
+    urls = [_normalize_url(str(u)) for u in urls]
     rows = []
     for u in urls:
         label, proba, why = predict_one(u, base_thr=base_thr, use_rules=use_rules)
@@ -204,13 +225,13 @@ with tab2:
         try:
             urls = []
             if txt.strip():
-                urls.extend([line.strip() for line in txt.splitlines() if line.strip()])
+                urls.extend([_normalize_url(line.strip()) for line in txt.splitlines() if line.strip()])
             if up is not None:
                 df_in = pd.read_csv(up)
                 if "url" not in df_in.columns:
                     st.error("CSV içinde 'url' kolonu yok.")
                 else:
-                    urls.extend(df_in["url"].astype(str).tolist())
+                    urls.extend([_normalize_url(u) for u in df_in["url"].astype(str).tolist()])
             urls = list(dict.fromkeys(urls))
             if not urls:
                 st.warning("Skorlanacak URL bulunamadı.")
