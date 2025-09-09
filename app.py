@@ -48,19 +48,23 @@ def _brandless_anomaly_flags(url: str):
     labels = [l for l in host.split(".") if l]
     if len(labels) >= 4:
         flags.append("many-subdomains"); notes.append(f"labels={len(labels)}")
-    check_labels = labels[:-1] if len(labels) >= 1 else []
+    tld = labels[-1] if labels else ""
+    sld = labels[-2] if len(labels) >= 2 else (labels[0] if labels else "")
+    subs = labels[:-2] if len(labels) >= 2 else []
+    safe_subs = {"m", "mail", "cdn", "static", "img", "images", "i", "s", "api"}
+    check_labels = [sld] + [l for l in subs if not re.fullmatch(r"www\d*", l) and l not in safe_subs]
     for lab in check_labels:
         if any(ch.isdigit() for ch in lab):
             flags.append("digit-in-label")
-        if re.search(r'[a-z][0-9]|[0-9][a-z]', lab):
+        if re.search(r"[a-z][0-9]|[0-9][a-z]", lab):
             flags.append("digit-subst")
-        if re.search(r'(.)\1\1', lab):
+        if re.search(r"(.)\1\1", lab) and not re.fullmatch(r"www\d*", lab):
             flags.append("repeat-run")
         if len(lab) >= 15:
             flags.append("long-label")
         if lab.startswith("-") or lab.endswith("-"):
             flags.append("hyphen-edge")
-    if re.search(r'login|verify|billing|update|confirm|secure|recovery', pathq, re.I):
+    if re.search(r"login|verify|billing|update|confirm|secure|recovery", pathq, re.I):
         flags.append("phishy-kw")
     if len(url) >= 100:
         flags.append("long-url")
