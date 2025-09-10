@@ -154,7 +154,6 @@ def predict_one(url: str, base_thr: float = 0.50, use_rules: bool = True):
             "typosquat": 0.75,
             "digit-subst": 0.75,
             "digit-in-label": 0.72,
-            "http": 0.70,
             "many-subdomains": 0.70,
             "nonstd-port": 0.70,
             "phishy-kw": 0.70,
@@ -245,3 +244,4 @@ with tab2:
             st.error(str(e))
 
 st.caption("Model: TF-IDF (char 2–5-gram) + Logistic Regression, kural eklemeleriyle.")
+
